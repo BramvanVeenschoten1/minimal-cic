@@ -26,7 +26,7 @@ data Term
 type Hyp = (String,Term)
 type Context = [Hyp]
 type Defs = Map String Term
-type Rule = [Term] -> Maybe (Term,[Term])
+type Rule = [Term] -> Term
 type Rules = Map String Rule
 type Signature = (Defs,Rules)
 
@@ -175,10 +175,12 @@ psubst args = f 0 where
   g fun arg = App fun arg
 
 whnf :: Signature -> Term -> Term
-whnf (defs,inds) t = f t [] where
+whnf (_,rules) t = f t [] where
   f (App fun arg) s = f fun (f arg [] : s)
   f (Lam _ _ t) (arg : s) = f (psubst [arg] t) s
-  f (Def n) s = error "Rewriting of constants not yet supported"
+  f (Def n) s = case M.lookup n rules of
+    Nothing -> mkapp (Def n) s
+    Just rule -> rule s
   f t s = mkApp t s
 
 convertible :: Signature -> Term -> Term -> Bool
@@ -231,6 +233,18 @@ infer sig ctx t = case t of
     ensureSort kdst
     pure kdst
   Def n -> pure (fst sig ! n)
+
+insertName :: String -> Term -> StateT Signature (Either Error) ()
+insertName name ty = do
+  (defs,rules) <- get
+  case M.lookup name defs of
+    Nothing -> do
+      traceM (name ++ " : " ++ showTerm [] ty)
+      put (M.insert name ty defs, rules)
+    Just name' -> Left ()
+
+insertRule :: String -> ([Term] -> Term) -> StateT Signature (Either Error) ()
+insertRule name rule = modify (\(defs,rules) -> (defs, M.insert name rule rules))
 
 checkCtor :: String -> Term -> Either Error [Bool]
 checkCtor ind = checkArgs where
@@ -294,12 +308,39 @@ branchType recs mot ctor ctorty = walkArgs mot [] ctorty where
     indices = getIndices ctorty args
     in mkApp (Var mot) (indices ++ [mkApp ctor args])
 
-insertName :: String -> Term -> StateT Signature (Either Error) ()
-insertName name ty = do
-  (defs,rules) <- get
-  case M.lookup name defs of
-    Nothing -> put (M.insert name ty defs, rules)
-    Just _ -> S.lift (Left ())
+computeElimRule :: Int -> Int -> Term -> [Term] -> [(String,Int)] -> [Term] -> Term
+computeElimRule ctorno indexno self branchTypes tags stack
+  -- motive=1, branches=ctorno, indices=indexno, eliminee=1
+  | ctorno + indexno + 2 <= length stack =
+    let
+      (motive : stack2) = stack
+      (branches, stack3) = L.splitAt ctorno stack2
+      (indices, stack4) = L.splitAt indexno stack3
+      (eliminee : stack5) = stack4
+      (head, args) = unrollApp (whnf eliminee)
+    in case head of
+      Def name ->
+        case L.lookup name tags of
+          Just tag ->
+            let
+              tag' = ctorno - tag - 1
+              branch = branches !! tag'
+
+              -- the branch here must be applied to the args and the recursive calls
+              -- the recursive calls are tricky because we must know which args are recursive
+              -- and what their types are, then we must type-correctly lambda-abstract over them,
+              -- and apply the recursor
+              -- how to get types of subdata:
+              -- from constructor or branch type
+              -- apply elimTy to motive
+              -- select branch
+              -- walk through args
+              -- inhabit recursion types
+
+            in undefined
+          _ -> mkApp self stack
+      _ -> mkApp self stack
+  | otherwise = mkApp self stack 
 
 checkInductive :: String -> Term -> [(String,Term)] -> StateT Signature (Either Error) ()
 checkInductive name arity ctors = do
@@ -315,13 +356,17 @@ checkInductive name arity ctors = do
   S.lift (mapM_ (infer sig []) ctortys)
   recs <- S.lift (mapM (checkCtor name) ctortys)
   zipWithM insertName ctornames ctortys
-  let crefs = fmap Def ctornames
+  let ctorno = length ctors
+      crefs = fmap Def ctornames
       motiveTy = motiveType ino iref arity
       branchTypes = zipWith4 branchType recs [0..] crefs ctortys
       walkIndices (Pi n src dst) = Pi n src (walkIndices dst)
-      walkIndices t = Pi "x" (mkApp iref (fmap Var (reverse [0 .. ino - 1]))) (mkApp (Var (length ctors)) (fmap Var (reverse [0 .. ino])))
+      walkIndices t = Pi "x" (mkApp iref (fmap Var (reverse [0 .. ino - 1]))) (mkApp (Var ctorno) (fmap Var (reverse [0 .. ino])))
       returnType = walkIndices arity
       branchNames = fmap (\n -> "p" ++ show n) [0..]
       branches = L.foldl (\acc (n,src) -> Pi n src acc) returnType (zip branchNames branchTypes)
       elimTy = Pi "P" motiveTy branches
-  insertName (name ++ "_rec") elimTy
+      elimName = name ++ "_rec"
+      elimRule = computeElimRule ctorno ino (Def elimName) (zipWith3 (\recs -> branchType recs 0) crefs ctortys) (zip ctornames [0..])
+  insertName elimName elimTy
+  insertRule elimName elimRule
