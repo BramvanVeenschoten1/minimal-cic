@@ -6,6 +6,7 @@ import Data.List as L
 import Control.Monad.State.Lazy as S 
 import Control.Applicative
 import Data.Char
+import Debug.Trace
 
 {-
 TODO:
@@ -26,9 +27,11 @@ data Term
 type Hyp = (String,Term)
 type Context = [Hyp]
 type Defs = Map String Term
-type Rule = [Term] -> Term
+type Rule = Signature -> [Term] -> Term
 type Rules = Map String Rule
-type Signature = (Defs,Rules)
+data Signature = Signature {
+  definitions :: Defs,
+  rules :: Rules}
 
 mkApp :: Term -> [Term] -> Term
 mkApp = L.foldl App
@@ -175,12 +178,12 @@ psubst args = f 0 where
   g fun arg = App fun arg
 
 whnf :: Signature -> Term -> Term
-whnf (_,rules) t = f t [] where
+whnf sig t = f t [] where
   f (App fun arg) s = f fun (f arg [] : s)
   f (Lam _ _ t) (arg : s) = f (psubst [arg] t) s
-  f (Def n) s = case M.lookup n rules of
-    Nothing -> mkapp (Def n) s
-    Just rule -> rule s
+  f (Def n) s = case M.lookup n (rules sig) of
+    Nothing -> mkApp (Def n) s
+    Just rule -> rule sig s
   f t s = mkApp t s
 
 convertible :: Signature -> Term -> Term -> Bool
@@ -232,19 +235,19 @@ infer sig ctx t = case t of
     kdst <- infer sig ((n,src):ctx) dst
     ensureSort kdst
     pure kdst
-  Def n -> pure (fst sig ! n)
+  Def n -> pure (definitions sig ! n)
 
 insertName :: String -> Term -> StateT Signature (Either Error) ()
 insertName name ty = do
-  (defs,rules) <- get
-  case M.lookup name defs of
+  sig <- get
+  case M.lookup name (definitions sig) of
     Nothing -> do
       traceM (name ++ " : " ++ showTerm [] ty)
-      put (M.insert name ty defs, rules)
-    Just name' -> Left ()
+      put (sig{ definitions = M.insert name ty (definitions sig)})
+    Just name' -> S.lift (Left ())
 
-insertRule :: String -> ([Term] -> Term) -> StateT Signature (Either Error) ()
-insertRule name rule = modify (\(defs,rules) -> (defs, M.insert name rule rules))
+insertRule :: String -> (Signature -> [Term] -> Term) -> StateT Signature (Either Error) ()
+insertRule name rule = modify (\sig -> sig {rules = M.insert name rule (rules sig)})
 
 checkCtor :: String -> Term -> Either Error [Bool]
 checkCtor ind = checkArgs where
@@ -308,16 +311,19 @@ branchType recs mot ctor ctorty = walkArgs mot [] ctorty where
     indices = getIndices ctorty args
     in mkApp (Var mot) (indices ++ [mkApp ctor args])
 
-computeElimRule :: Int -> Int -> Term -> [Term] -> [(String,Int)] -> [Term] -> Term
-computeElimRule ctorno indexno self branchTypes tags stack
+computeElimRule :: Int -> Int -> Term -> Term -> [(String,Int)] -> Signature -> [Term] -> Term
+computeElimRule ctorno indexno self selfType tags sig stack
   -- motive=1, branches=ctorno, indices=indexno, eliminee=1
   | ctorno + indexno + 2 <= length stack =
     let
+      -- the branches in the elimtype are closed except for the motive
+      -- when extracted, the branches must be lifted.
       (motive : stack2) = stack
       (branches, stack3) = L.splitAt ctorno stack2
       (indices, stack4) = L.splitAt indexno stack3
       (eliminee : stack5) = stack4
-      (head, args) = unrollApp (whnf eliminee)
+      (head, args) = unrollApp eliminee
+      recApp = mkApp self (motive : branches)
     in case head of
       Def name ->
         case L.lookup name tags of
@@ -325,19 +331,34 @@ computeElimRule ctorno indexno self branchTypes tags stack
             let
               tag' = ctorno - tag - 1
               branch = branches !! tag'
+              Pi _ _ branchType = branchTypes !! tag'
+              ctorType = ctorTypes !! tag'
+              ctorArity = length args
 
-              -- the branch here must be applied to the args and the recursive calls
-              -- the recursive calls are tricky because we must know which args are recursive
-              -- and what their types are, then we must type-correctly lambda-abstract over them,
-              -- and apply the recursor
-              -- how to get types of subdata:
-              -- from constructor or branch type
-              -- apply elimTy to motive
-              -- select branch
-              -- walk through args
-              -- inhabit recursion types
+              discardArgs 0 ty = computeRecursors 0 ty
+              discardArgs n (Pi _ _ dst) = discardArgs (n - 1) dst
 
-            in undefined
+              computeRecursors n (Pi _ rec rest) = computeRecursor 0 n rec : computeRecursors (n + 1) rest
+              computeRecursors _ _ = []
+
+              computeRecursor argno recno (Pi name src dst) = Lam name src (computeRecursor (argno + 1) (recno + 1) dst)
+              computeRecursor argno recno t = let
+                (indices,[datum]) = L.splitAt indexno (snd (unrollApp t))
+                argno = last (snd (unrollApp t))
+                -- argno here is lifted over the pi abstractions.
+                
+                in undefined -- indices, compute arg
+              
+              -- suppose we substitute the constructor arguments but not the motive in the branch type,
+              -- the resulting term will have the types of the recursive applications, abstracted over their arguments,
+              -- as well as the abstract motive applied to the indices and argument we need.
+              -- then we swap pi's for lambdas, the motive for the recursive application et voila
+              -- to be precise, each recapp abstracts over the motive, and so must be lifted, then the motive can be
+              -- substituted in
+
+              recCalls = discardArgs ctorArity branchType
+              branchArgs = args ++ recCalls
+            in whnf sig (mkApp branch branchArgs)
           _ -> mkApp self stack
       _ -> mkApp self stack
   | otherwise = mkApp self stack 
@@ -367,6 +388,6 @@ checkInductive name arity ctors = do
       branches = L.foldl (\acc (n,src) -> Pi n src acc) returnType (zip branchNames branchTypes)
       elimTy = Pi "P" motiveTy branches
       elimName = name ++ "_rec"
-      elimRule = computeElimRule ctorno ino (Def elimName) (zipWith3 (\recs -> branchType recs 0) crefs ctortys) (zip ctornames [0..])
+      elimRule = computeElimRule ctorno ino (Def elimName) (zipWith (\recs -> branchType recs 0) crefs ctortys) (zip ctornames [0..])
   insertName elimName elimTy
   insertRule elimName elimRule
