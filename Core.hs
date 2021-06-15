@@ -1,19 +1,10 @@
 module Core where
 
-import Control.Monad
 import Data.Map as M
 import Data.List as L
-import Control.Monad.State.Lazy as S 
 import Control.Applicative
-import Data.Char
-import Debug.Trace
-
-{-
-TODO:
-- parsing
-- printing
-- rewrite rules
--}
+import Control.Monad
+import Control.Monad.State.Lazy as S
 
 data Term
   = Type
@@ -24,14 +15,21 @@ data Term
   | App Term Term
   | Def String
 
+data Error
+  = ExpectedSort Context Term
+  | ExpectedFunction Context Term
+  | ExpectedType Context Term Term Term
+  | NameNotDefined String
+  | NameAlreadyDefined String
+  | IllFormedTypeConstructor String
+  | IllFormedDataConstructor String
+  | OccurrenceInIndex String
+  | NegativeOccurrence String
+
 type Hyp = (String,Term)
 type Context = [Hyp]
-type Defs = Map String Term
-type Rule = Signature -> [Term] -> Term
-type Rules = Map String Rule
-data Signature = Signature {
-  definitions :: Defs,
-  rules :: Rules}
+type Rule = (Term -> [Term] -> Term) -> [Term] -> Term
+type Signature = (Map String Term, Map String Rule)
 
 mkApp :: Term -> [Term] -> Term
 mkApp = L.foldl App
@@ -55,82 +53,8 @@ map push ctx f t = case t of
   Pi  n src dst -> Pi  n (f ctx src) (f (push (n,src) ctx) dst)
   t -> t
 
--- parsing
-
-type Parser = StateT String Maybe
-
-char :: Parser Char
-char = do
-  c <- get
-  case c of
-    (x : xs) -> put xs >> pure x
-    _ -> S.lift Nothing
-
-parseIf :: (Char -> Bool) -> Parser Char
-parseIf f = do
-  x <- char
-  guard (f x)
-  pure x
-
-string :: String -> Parser String
-string = mapM (parseIf . (==))
-
-ws :: Parser ()
-ws = blockComment *> ws <|> lineComment *> ws <|> parseIf isSpace *> ws <|> pure ()
-  where
-    blockComment = string "{-" *> blockRest
-    blockRest = string "-}" <|> blockComment *> blockRest <|> char *> blockRest
-    lineComment = string "--" *> lineRest
-    lineRest = parseIf (== '\n') <|> char *> lineRest
-
-ident :: Parser [Char]
-ident =
-  (:) <$> parseIf (\x -> x == '_' || isAlpha x)
-    <*> many (parseIf (\x -> x == '_' || isAlphaNum x))
-
-symbol :: Parser String
-symbol = do
-  i <- ident
-  if i == "def" || i == "data"
-  then S.lift Nothing
-  else pure i
-
-expect :: Char -> Parser ()
-expect = void . parseIf . (==)
-
-expr :: Parser Term
-expr =
-  (Type <$ expect '*') <|>
-  (Def <$> symbol) <|>
-  (Lam
-    <$> (expect '[' *> symbol)
-    <*> (expect ':' *> expr)
-    <*> (expect ']' *> expr)) <|>
-  (Pi
-    <$> (expect '{' *> symbol)
-    <*> (expect ':' *> expr)
-    <*> (expect '}' *> expr)) <|>
-  (App
-    <$> (expect '(' *> expr)
-    <*> (expect ')' *> expr))
-
-decl :: Parser (Either (String,Term)(String,Term,[(String,Term)]))
-decl = do
-  kw <- ident
-  case kw of
-    "def" -> do
-      name <- symbol
-      expect '='
-      body <- expr
-      pure (Left (name,body))
-    "data" -> do
-      name <- symbol
-      expect ':'
-      arity <- expr
-      let ctor = (,) <$> (expect '|' *> symbol) <*> (expect ':' *> expr)
-      ctors <- many ctor
-      pure (Right (name,arity,ctors))
-
+-- a little hack, replace every def by a deBruijn index if in scope
+-- the parser does not keep a context
 solveVars :: Term -> Term
 solveVars t = f [] t where
   f ctx (Def n) = g 0 ctx n
@@ -140,22 +64,6 @@ solveVars t = f [] t where
   g n ((name',ty):ctx) name
     | name == name' = Var n
     | otherwise = g (n + 1) ctx name
-
--- prettyprint
-
-showTerm :: Context -> Term -> String
-showTerm ctx Type = "*"
-showTerm ctx Kind = "?"
-showTerm ctx (Var n) = fst (ctx !! n)
-showTerm ctx (Lam n src dst) = "[" ++ n ++ ":" ++ showTerm ctx src ++ "]" ++ showTerm ((n,src):ctx) dst
-showTerm ctx (Pi n src dst) = "{" ++ n ++ ":" ++ showTerm ctx src ++ "}" ++ showTerm ((n,src):ctx) dst 
-showTerm ctx (App fun arg) = "(" ++ showTerm ctx fun ++ ")" ++ showTerm ctx arg
-showTerm ctx (Def name) = name
-
-showDefs :: Defs -> String
-showDefs = unlines . fmap (\(name,ty) -> name ++ " : " ++ showTerm [] ty) . toList
-
--- checker
 
 lift :: Int -> Term -> Term
 lift n = f 0 where
@@ -181,9 +89,9 @@ whnf :: Signature -> Term -> Term
 whnf sig t = f t [] where
   f (App fun arg) s = f fun (f arg [] : s)
   f (Lam _ _ t) (arg : s) = f (psubst [arg] t) s
-  f (Def n) s = case M.lookup n (rules sig) of
+  f (Def n) s = case M.lookup n (snd sig) of
     Nothing -> mkApp (Def n) s
-    Just rule -> rule sig s
+    Just rule -> rule f s
   f t s = mkApp t s
 
 convertible :: Signature -> Term -> Term -> Bool
@@ -201,53 +109,52 @@ convertible sig t0 t1 = cmp (whnf sig t0) (whnf sig t1) where
   cmp (Def n0) (Def n1) = n0 == n1
   cmp _ _ = False
 
-type Error = ()
+ensureSort :: Context -> Term -> Either Error ()
+ensureSort _ Type = pure ()
+ensureSort _ Kind = pure ()
+ensureSort ctx x  = Left (ExpectedSort ctx x)
 
-ensureSort :: Term -> Either Error ()
-ensureSort Type = pure ()
-ensureSort Kind = pure ()
-ensureSort _    = Left ()
-
-ensureFun :: Signature -> Term -> Either Error (Term,Term)
-ensureFun sig t = case whnf sig t of
+ensureFun :: Signature -> Context -> Term -> Either Error (Term,Term)
+ensureFun sig ctx t = case whnf sig t of
   Pi _ src dst -> pure (src,dst)
-  _ -> Left ()
+  x -> Left (ExpectedFunction ctx x)
 
 infer :: Signature -> Context -> Term -> Either Error Term
 infer sig ctx t = case t of
   Type -> pure Kind
-  Kind -> Left ()
+  Kind -> error "infer Kind"
   Var n -> pure (Core.lift (n + 1) (snd (ctx !! n)))
   App f x -> do
     tf <- infer sig ctx f
-    (src,dst) <- ensureFun sig tf
+    (src,dst) <- ensureFun sig ctx tf
     tx <- infer sig ctx x
-    unless (convertible sig src tx) (Left ())
+    unless (convertible sig src tx) (Left (ExpectedType ctx src x tx))
     pure (psubst [x] dst)
   Lam n src dst -> do
     ksrc <- infer sig ctx src
-    ensureSort ksrc
+    ensureSort ctx ksrc
     tdst <- infer sig ((n,src):ctx) dst
     pure (Pi n src tdst)
   Pi n src dst -> do
     ksrc <- infer sig ctx src
-    ensureSort ksrc
+    ensureSort ctx ksrc
     kdst <- infer sig ((n,src):ctx) dst
-    ensureSort kdst
+    ensureSort ctx kdst
     pure kdst
-  Def n -> pure (definitions sig ! n)
+  Def n -> case M.lookup n (fst sig) of
+    Just ty -> pure ty
+    Nothing -> Left (NameNotDefined n)
 
 insertName :: String -> Term -> StateT Signature (Either Error) ()
 insertName name ty = do
-  sig <- get
-  case M.lookup name (definitions sig) of
+  (defs,rules) <- get
+  case M.lookup name defs of
     Nothing -> do
-      traceM (name ++ " : " ++ showTerm [] ty)
-      put (sig{ definitions = M.insert name ty (definitions sig)})
-    Just name' -> S.lift (Left ())
+      put (M.insert name ty defs, rules)
+    Just name' -> S.lift (Left (NameAlreadyDefined name))
 
-insertRule :: String -> (Signature -> [Term] -> Term) -> StateT Signature (Either Error) ()
-insertRule name rule = modify (\sig -> sig {rules = M.insert name rule (rules sig)})
+insertRule :: String -> Rule -> StateT Signature (Either Error) ()
+insertRule name rule = modify (\(defs,rules) -> (defs, M.insert name rule rules))
 
 checkCtor :: String -> Term -> Either Error [Bool]
 checkCtor ind = checkArgs where
@@ -256,16 +163,16 @@ checkCtor ind = checkArgs where
     (Def n, args) -> 
       if n == ind && not (any occurs args)
       then pure []
-      else Left ()
-    _ -> Left ()
+      else Left (OccurrenceInIndex ind)
+    _ -> Left (IllFormedDataConstructor ind)
 
   checkPositive (Pi _ src dst)
-    | occurs src = Left ()
+    | occurs src = Left (NegativeOccurrence ind)
     | otherwise = checkPositive dst
   checkPositive t =
     let (fun,args) = unrollApp t in
     if any occurs args
-    then Left ()
+    then Left (OccurrenceInIndex ind)
     else case fun of
       Def n -> pure (n == ind)
       _ -> pure False
@@ -277,88 +184,103 @@ checkCtor ind = checkArgs where
     | otherwise = acc
   f () t acc = Core.fold (const id) () f t acc
 
-motiveType :: Int -> Term -> Term -> Term
-motiveType ino iref (Pi n src dst) = Pi n src (motiveType ino iref dst)
-motiveType ino iref t = Pi "_" (mkApp iref (fmap Var (reverse [0 .. ino - 1]))) Type
+motiveType :: Int -> Int -> Term -> Term -> Term
+motiveType ino iname iref (Pi n src dst) = Pi ("i" ++ show iname) src (motiveType ino (iname + 1) iref dst)
+motiveType ino iname iref t = Pi "_" (mkApp iref (fmap Var (reverse [0 .. ino - 1]))) Type
 
 getIndices :: Term -> [Term] -> [Term]
 getIndices fun args = snd (unrollApp (psubst args (unroll fun))) where
   unroll (Pi _ _ dst) = unroll dst
   unroll t = t
 
-branchType :: [Bool] -> Int -> Term -> Term -> Term
-branchType recs mot ctor ctorty = walkArgs mot [] ctorty where
-  walkArgs mot ctx (Pi n src dst) = Pi n src (walkArgs (mot + 1) ((n,src):ctx) dst)
-  walkArgs mot ctx t = computeIH mot (length ctx - 1) ctx recs t
+countDomains :: Term -> Int
+countDomains (Pi _ _ dst) = 1 + countDomains dst
+countDomains _ = 0
+
+computeBranchType :: [Bool] -> Int -> Term -> Term -> Term
+computeBranchType recs mot ctor ctorty = walkArgs mot 0 [] ctorty where
+  ctor_tag   = mot
+  ctor_arity = countDomains ctorty
+
+  walkArgs mot argc ctx (Pi n src dst) = let name = "x" ++ show (mot - ctor_tag) in
+    Pi name src (walkArgs (mot + 1) (argc + 1) ((name,src):ctx) dst)
+  walkArgs mot argc ctx t = computeIH mot (ctor_arity - 1) ctx recs t
 
   computeIH mot argd ctx [] t = computeResult mot ctx t
   computeIH mot argd ctx (False:recs) t = computeIH mot (argd - 1) ctx recs t
   computeIH mot argd ctx (True:recs) t = let
     ty = Core.lift (argd + 1) (snd (ctx !! argd))
     ih = abstractArgs mot argd 0 ty ty
-    name = "ih" ++ show (length recs - argd - 1)
+    name = "ih" ++ show (length ctx - argd - 1)
     in Pi name ih (computeIH (mot + 1) argd ((name,ih):ctx) recs t)
 
-  abstractArgs mot v argc ty (Pi n src dst) = Pi n src (abstractArgs (mot + 1) (v + 1) (argc + 1) ty dst)
+  abstractArgs mot v argc ty (Pi n src dst) = Pi ("a" ++ show v) src (abstractArgs (mot + 1) (v + 1) (argc + 1) ty dst)
   abstractArgs mot v argc ty t = let
-    args = fmap Var (reverse [0 .. argc - 1])
-    indices = getIndices (Core.lift argc ty) args -- questionable
-    in mkApp (Var mot) (indices ++ [mkApp (Var v) args])
+    args = fmap Var ([0 .. argc - 1])
+    indices = getIndices (Core.lift argc ty) args
+    in mkApp (Var mot) (reverse indices ++ [mkApp (Var v) args])
 
   computeResult mot ctx t = let
     ih_count = length (L.filter id recs)
-    args = fmap Var (reverse [ih_count .. length ctx - ih_count - 1])
+    args = fmap Var [ih_count .. ih_count + ctor_arity - 1]
     indices = getIndices ctorty args
-    in mkApp (Var mot) (indices ++ [mkApp ctor args])
+    in mkApp (Var mot) (reverse indices ++ [mkApp ctor (reverse args)])
 
-computeElimRule :: Int -> Int -> Term -> Term -> [(String,Int)] -> Signature -> [Term] -> Term
-computeElimRule ctorno indexno self selfType tags sig stack
+-- discard first n domains of a nested pi type
+unrollPi :: Int -> Term -> Term
+unrollPi 0 t = t
+unrollPi n (Pi _ _ dst) = unrollPi (n - 1) dst
+unrollPi _ _ = error "unrolling pi too far"
+
+-- select a branch type from an eliminator type
+getNthBranch :: Int -> Int -> Term -> Term
+getNthBranch 0 m (Pi _ src _) = Core.lift m src
+getNthBranch n m (Pi _ _ dst) = getNthBranch (n - 1) (m + 1) dst
+
+-- unroll pi type, lifting domains
+unrollRecTypes :: Int -> Term -> [Term]
+unrollRecTypes n (Pi _ src dst) = Core.lift n src : unrollRecTypes (n + 1) dst
+unrollRecTypes _ _ = []
+
+-- replace a recursive call type with a term inhabiting it
+-- the type is a nested product type with an application in the codomain.
+-- this application should have a variable as head
+-- the pi types are replaced by lambda's, the variable by the recursive call term
+replaceRecs :: String -> Int -> Term -> Term -> Term
+replaceRecs ref n recCall (Pi name src dst) = Lam name src (replaceRecs ref (n + 1) recCall dst)
+replaceRecs ref n recCall t = case unrollApp t of
+  (Var m, args) -> mkApp (Core.lift m recCall) args
+  _ -> error "expected a variable in application head in recursive call"
+
+-- compute elimination rule for an inductive data types given
+-- the number of constructors, number of indices, the reference to the name, the eliminator type
+-- and a list associating constructor names with tags
+computeElimRule :: Int -> Int -> Term -> Term -> [(String,Int)] -> Rule
+computeElimRule ctorno indexno self @ (Def name) selfType tags whnf stack
   -- motive=1, branches=ctorno, indices=indexno, eliminee=1
   | ctorno + indexno + 2 <= length stack =
     let
-      -- the branches in the elimtype are closed except for the motive
-      -- when extracted, the branches must be lifted.
       (motive : stack2) = stack
       (branches, stack3) = L.splitAt ctorno stack2
       (indices, stack4) = L.splitAt indexno stack3
       (eliminee : stack5) = stack4
       (head, args) = unrollApp eliminee
       recApp = mkApp self (motive : branches)
+      argc = length args
+      Pi _ _ selfType' = selfType
     in case head of
       Def name ->
         case L.lookup name tags of
           Just tag ->
             let
-              tag' = ctorno - tag - 1
+              tag' = tag
               branch = branches !! tag'
-              Pi _ _ branchType = branchTypes !! tag'
-              ctorType = ctorTypes !! tag'
-              ctorArity = length args
-
-              discardArgs 0 ty = computeRecursors 0 ty
-              discardArgs n (Pi _ _ dst) = discardArgs (n - 1) dst
-
-              computeRecursors n (Pi _ rec rest) = computeRecursor 0 n rec : computeRecursors (n + 1) rest
-              computeRecursors _ _ = []
-
-              computeRecursor argno recno (Pi name src dst) = Lam name src (computeRecursor (argno + 1) (recno + 1) dst)
-              computeRecursor argno recno t = let
-                (indices,[datum]) = L.splitAt indexno (snd (unrollApp t))
-                argno = last (snd (unrollApp t))
-                -- argno here is lifted over the pi abstractions.
-                
-                in undefined -- indices, compute arg
-              
-              -- suppose we substitute the constructor arguments but not the motive in the branch type,
-              -- the resulting term will have the types of the recursive applications, abstracted over their arguments,
-              -- as well as the abstract motive applied to the indices and argument we need.
-              -- then we swap pi's for lambdas, the motive for the recursive application et voila
-              -- to be precise, each recapp abstracts over the motive, and so must be lifted, then the motive can be
-              -- substituted in
-
-              recCalls = discardArgs ctorArity branchType
-              branchArgs = args ++ recCalls
-            in whnf sig (mkApp branch branchArgs)
+              computeBranchType = getNthBranch tag' 0 selfType'
+              computeBranchTypeWithArgs = psubst args (unrollPi argc computeBranchType)
+              recTypes = unrollRecTypes 0 computeBranchTypeWithArgs
+              recCalls = fmap (replaceRecs name 0 recApp) recTypes
+              branchArgs = reverse args ++ recCalls ++ stack5
+            in whnf branch branchArgs
           _ -> mkApp self stack
       _ -> mkApp self stack
   | otherwise = mkApp self stack 
@@ -367,27 +289,35 @@ checkInductive :: String -> Term -> [(String,Term)] -> StateT Signature (Either 
 checkInductive name arity ctors = do
   sig <- get
   k <- S.lift (infer sig [] arity)
-  unless (convertible sig k Kind) (S.lift (Left ()))
+  unless (convertible sig k Kind) (S.lift (Left (IllFormedTypeConstructor name)))
   insertName name arity
-  let unrollPi (Pi _ _ dst) = 1 + unrollPi dst
-      unrollPi _ = 0
-      ino = unrollPi arity
+  let ino = countDomains arity
       iref = Def name
       (ctornames,ctortys) = unzip ctors
+  sig <- get
   S.lift (mapM_ (infer sig []) ctortys)
   recs <- S.lift (mapM (checkCtor name) ctortys)
   zipWithM insertName ctornames ctortys
   let ctorno = length ctors
       crefs = fmap Def ctornames
-      motiveTy = motiveType ino iref arity
-      branchTypes = zipWith4 branchType recs [0..] crefs ctortys
-      walkIndices (Pi n src dst) = Pi n src (walkIndices dst)
-      walkIndices t = Pi "x" (mkApp iref (fmap Var (reverse [0 .. ino - 1]))) (mkApp (Var ctorno) (fmap Var (reverse [0 .. ino])))
-      returnType = walkIndices arity
-      branchNames = fmap (\n -> "p" ++ show n) [0..]
-      branches = L.foldl (\acc (n,src) -> Pi n src acc) returnType (zip branchNames branchTypes)
-      elimTy = Pi "P" motiveTy branches
+      motiveTy = motiveType ino 0 iref arity
+      branchTypes = zipWith4 computeBranchType recs [0..] crefs ctortys
+      computeReturnType iname (Pi n src dst) = Pi ("i" ++ show iname) src (computeReturnType (iname + 1) dst)
+      computeReturnType iname t =
+        let indices = fmap Var (reverse [0 .. ino - 1])
+        in Pi "x" (mkApp iref indices) (mkApp (Var (ino + ctorno + 1)) (Var ino : indices))
+      returnType = computeReturnType 0 arity
+      branchNames = fmap (\n -> "b" ++ show n) [0..]
+      branches = L.foldr (\(n,src) acc -> Pi n src acc) returnType (zip branchNames branchTypes)
+      elimTy = Pi "p" motiveTy branches
       elimName = name ++ "_rec"
-      elimRule = computeElimRule ctorno ino (Def elimName) (zipWith (\recs -> branchType recs 0) crefs ctortys) (zip ctornames [0..])
+      elimRule = computeElimRule ctorno ino (Def elimName) elimTy (zip ctornames [0..])
   insertName elimName elimTy
   insertRule elimName elimRule
+
+checkDefinition :: String -> Term -> StateT Signature (Either Error) ()
+checkDefinition name body = do
+  sig <- get
+  ty <- S.lift (infer sig [] body)
+  insertName name ty
+  insertRule name (\whnf stack -> whnf body stack)

@@ -1,0 +1,143 @@
+
+data unit : Type
+| tt : unit
+
+data bool : Type
+| true  : bool
+| false : bool
+
+data eq : Pi (a : Type), a -> a -> Type
+| refl : Pi (a : Type)(x : a), eq a x x
+
+let cong =
+  eq_rec (\(a : Type)(x y : a)(e : eq a x y), Pi (b : Type)(f : a -> b), eq b (f x) (f y))
+    (\(a : Type)(x : a)(b : Type)(f : a -> b), refl b (f x))
+
+let sym =
+  eq_rec (\(a : Type)(x y : a)(e : eq a x y), eq a y x)
+    (\(a : Type)(x : a), refl a x)
+
+let b2t = eq bool true
+
+axiom conflict : Pi a : Type, eq bool true false -> a
+
+data nat : Type
+| zero : nat
+| succ : nat -> nat
+
+let less = 
+  nat_rec (\(n:nat), nat -> bool)
+    (nat_rec (\(m:nat), bool)
+      false
+      (\(m:nat)(ih:bool),true))
+    (\(n:nat)(ih:nat -> bool),
+      nat_rec (\(m:nat), bool)
+        false
+        (\(m:nat)(_:bool), ih m))
+
+let Less = \(n m : nat), b2t (less n m)
+let Leq  = \(n m : nat), Less n (succ m)
+
+let less_than_zero =
+  nat_rec (\(n:nat), Pi (a : Type), Less n zero -> a)
+    (\(a:Type)(l:Less zero zero), conflict a l)
+    (\(n:nat)(ih:Pi(a:Type),Less n zero -> a)(a:Type)(l:Less (succ n) zero), conflict a l)
+    
+let less_base =
+  nat_rec (\(n:nat), Less n (succ n))
+    (refl bool true)
+    (\(n:nat)(ih:Less n (succ n)), ih)
+
+let less_step =
+  nat_rec (\(n:nat), Pi(m:nat), Less n m -> Less n (succ m))
+    (\(m:nat)(_:Less zero m), refl bool true)
+    (\(n:nat)(ih:Pi m:nat, Less n m -> Less n (succ m)),
+      nat_rec (\(m:nat), Less (succ n) m -> Less (succ n) (succ m))
+        (\(l:Less (succ n) zero), conflict (Less (succ n) (succ zero)) l)
+        (\(m:nat)(_:Less (succ n) m -> Less (succ n)(succ m))(l:Less (succ n) (succ m)), ih m l))
+
+let leq_trans =
+  nat_rec (\(n:nat),Pi (m o:nat), Leq n m -> Leq m o -> Leq n o)
+    (\(m o:nat)(_:Leq zero m)(_: Leq m o), refl bool true)
+    (\(n:nat)(ih:Pi(m o:nat),Leq n m -> Leq m o -> Leq n o),
+      nat_rec (\(m:nat), Pi o:nat, Leq (succ n) m -> Leq m o -> Leq (succ n) o)
+        (\(o:nat)(l1:Leq (succ n) zero)(l2:Leq zero o), less_than_zero n (Leq (succ n) o) l1)
+        (\(m:nat)(_:Pi o:nat,Leq (succ n) m -> Leq m o -> Leq (succ n) o),
+          nat_rec (\(o:nat),Leq n m -> Leq (succ m) o -> Leq (succ n) o)
+            (\(l1:Leq n m)(l2 : Leq (succ m) zero), less_than_zero m (Leq (succ n) zero) l2)
+            (\(o:nat)(_:Leq n m -> Leq (succ m) o -> Leq (succ n) o), ih m o)))
+
+let strong_aux =
+  \(p:nat -> Type)(h:Pi x:nat, (Pi y:nat, Less y x -> p y) -> p x),
+    nat_rec (\(n:nat), Pi m:nat, Less m n -> p m)
+      (\(m:nat)(l:Less m zero), less_than_zero m (p m) l)
+      (\(n:nat)(ih:Pi m:nat, Less m n -> p m)(m:nat)(l1:Less m (succ n)),
+        h m (\(o:nat)(l2:Less o m), ih o (leq_trans (succ o) m n l2 l1)))
+
+let strong_induction =
+  \(p:nat -> Type)(h:Pi x:nat, (Pi y:nat, Less y x -> p y) -> p x)(n:nat),
+    storng_aux p h (succ n) n (less_step n)
+
+print strong_aux
+
+let one   = succ zero
+let two   = succ one
+let three = succ two
+let four  = succ three
+let five  = succ four
+let six   = succ five
+let seven = succ six
+let eight = succ seven
+let nine  = succ eight
+let ten   = succ nine
+
+print less two two
+print less three four
+print less four three
+
+data fin : nat -> Type
+| fzero : Pi n : nat, fin (succ n)
+| fsucc : Pi n : nat, fin n -> fin (succ n)
+
+data acc : Pi (a : Type), (a -> a -> Type) -> a -> Type
+| acc_intro : Pi (a : Type)(r : a -> a -> Type)(x : a)(inv : Pi y : a, r y x -> acc a r y), acc a r x
+
+let acc_rec2 =
+  \(a:Type)(r:a -> a -> Type),
+    acc_rec (\(a:Type)(r:a -> a -> Type)(x:a)(acx:acc a r x),
+      Pi (p : Pi x : a, acc a r x -> Type)
+        (b : Pi (x : a)(inv : Pi y : a, r y x -> acc a r y)(ih : Pi (y : a)(l : r y x), p (inv y l)), p (acc_intro x inv)), p acx)
+      (\(a:Type)(r:a -> a -> Type)(x:a)(inv:Pi y:a, r y x -> acc a r y)(ih:Pi (y:a)(l:r y x), p (inv y l)), b x inv ih)
+      a r
+
+let plus = nat_rec (\(n:nat),nat -> nat) (\(m:nat),m) (\(n:nat)(ih:nat -> nat)(m:nat), succ (ih m))
+
+let plus_associates =
+  nat_rec (\(x : nat), Pi (y z : nat), eq nat (plus x (plus y z)) (plus (plus x y) z))
+    (\(y z : nat), refl nat (plus y z))
+    (\(x : nat)(ih : Pi (y z : nat), eq nat (plus x (plus y z)) (plus (plus x y) z))(y z : nat), 
+      cong nat (plus x (plus y z)) (plus (plus x y) z) (ih y z) nat succ)
+
+data pair : Type -> Type -> Type
+| mk_pair : Pi (a b : Type), a -> b -> pair a b
+
+let pair_rec2 =
+  pair_rec (\(a b : Type)(x : pair a b), Pi p : pair a b -> Type, (Pi (x : a)(y : b), p (mk_pair a b x y)) -> p x)
+    (\(a b : Type)(x : a)(y : b)(p : pair a b -> Type)(b : Pi (x : a)(y : b), p (mk_pair a b x y)), b x y)
+
+print void_rec
+print unit_rec
+print bool_rec
+print nat_rec
+print fin_rec
+print eq_rec
+print acc_rec
+print plus_associates
+print plus_associates two two two
+print pair_rec
+print pair_rec2
+
+
+
+
+
