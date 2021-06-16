@@ -174,8 +174,6 @@ punct :: Parser Token
 punct = do
   ps <- asks puncts
   Pct <$> asum (string <$> ps)
-  fmap Pct (fmap string ps)
-  asks puncts >>= (fmap Pct . fmap string)
 
 token :: Parser Token
 token = ws *> (eof <|> f)
