@@ -1,5 +1,5 @@
 # A minimal implementation of the Calculus of Inductive Constructions.
-The goal of this project is to implement, as simply as possible and inductive type theory, complete with checker and evaluator.
+The goal of this project is to implement, as simply as possible, an inductive type theory, complete with checker and evaluator.
 The design of the typechecker deliberately favours simplicity over usability and efficiency. The lexer, parser and prettyprinter do not satisfy these constraints. They are designed for human-readable input and output. As they are adapted from another project, they contain some unused code, such as file position information.
 The parser accepts a few syntactial shorthands for lambda- and Pi expressions.
 
