@@ -6,6 +6,13 @@ import Control.Applicative
 import Control.Monad
 import Control.Monad.State.Lazy as S
 
+{-
+todo:
+- make separate computeElimType function
+- separate eliminator computation and reduction
+- branchtypes : deep to lifted -> lifted to deep
+-}
+
 data Term
   = Type
   | Kind
@@ -156,6 +163,7 @@ insertName name ty = do
 insertRule :: String -> Rule -> StateT Signature (Either Error) ()
 insertRule name rule = modify (\(defs,rules) -> (defs, M.insert name rule rules))
 
+-- check strict positivity of constructors, and return indices of recursive arguments
 checkCtor :: String -> Term -> Either Error [Bool]
 checkCtor ind = checkArgs where
   checkArgs (Pi _ src dst) = (:) <$> checkPositive src <*> checkArgs dst
@@ -184,14 +192,18 @@ checkCtor ind = checkArgs where
     | otherwise = acc
   f () t acc = Core.fold (const id) () f t acc
 
-motiveType :: Int -> Int -> Term -> Term -> Term
-motiveType ino iname iref (Pi n src dst) = Pi ("i" ++ show iname) src (motiveType ino (iname + 1) iref dst)
-motiveType ino iname iref t = Pi "_" (mkApp iref (fmap Var (reverse [0 .. ino - 1]))) Type
+computeMotiveType :: Int -> Int -> Term -> Term -> Term
+computeMotiveType ino iname iref (Pi n src dst) = Pi ("i" ++ show iname) src (computeMotiveType ino (iname + 1) iref dst)
+computeMotiveType ino iname iref t = Pi "_" (mkApp iref (fmap Var (reverse [0 .. ino - 1]))) Type
+
+-- discard first n domains of a nested pi type
+unrollPi :: Int -> Term -> Term
+unrollPi 0 t = t
+unrollPi n (Pi _ _ dst) = unrollPi (n - 1) dst
+unrollPi _ _ = error "unrolling pi too far"
 
 getIndices :: Term -> [Term] -> [Term]
-getIndices fun args = snd (unrollApp (psubst args (unroll fun))) where
-  unroll (Pi _ _ dst) = unroll dst
-  unroll t = t
+getIndices fun args = snd (unrollApp (psubst args (unrollPi (length args) fun)))
 
 countDomains :: Term -> Int
 countDomains (Pi _ _ dst) = 1 + countDomains dst
@@ -216,7 +228,7 @@ computeBranchType recs mot ctor ctorty = walkArgs mot 0 [] ctorty where
 
   abstractArgs mot v argc ty (Pi n src dst) = Pi ("a" ++ show v) src (abstractArgs (mot + 1) (v + 1) (argc + 1) ty dst)
   abstractArgs mot v argc ty t = let
-    args = fmap Var ([0 .. argc - 1])
+    args = fmap Var [0 .. argc - 1]
     indices = getIndices (Core.lift argc ty) args
     in mkApp (Var mot) (reverse indices ++ [mkApp (Var v) args])
 
@@ -225,19 +237,14 @@ computeBranchType recs mot ctor ctorty = walkArgs mot 0 [] ctorty where
     args = fmap Var [ih_count .. ih_count + ctor_arity - 1]
     indices = getIndices ctorty args
     in mkApp (Var mot) (reverse indices ++ [mkApp ctor (reverse args)])
+ 
+computeReturnType :: Int -> Int -> Int -> Term -> Term -> Term   
+computeReturnType ino ctorno iname iref (Pi n src dst) = Pi ("i" ++ show iname) src (computeReturnType ino ctorno (iname + 1) iref dst)
+computeReturnType ino ctorno iname iref t =
+  let indices = fmap Var (reverse [0 .. ino - 1])
+  in Pi "x" (mkApp iref indices) (mkApp (Var (ino + ctorno + 1)) (Var ino : indices))
 
--- discard first n domains of a nested pi type
-unrollPi :: Int -> Term -> Term
-unrollPi 0 t = t
-unrollPi n (Pi _ _ dst) = unrollPi (n - 1) dst
-unrollPi _ _ = error "unrolling pi too far"
-
--- select a branch type from an eliminator type
-getNthBranch :: Int -> Int -> Term -> Term
-getNthBranch 0 m (Pi _ src _) = Core.lift m src
-getNthBranch n m (Pi _ _ dst) = getNthBranch (n - 1) (m + 1) dst
-
--- unroll pi type, lifting domains
+-- unroll pi type, lifting domains into current context
 unrollRecTypes :: Int -> Term -> [Term]
 unrollRecTypes n (Pi _ src dst) = Core.lift n src : unrollRecTypes (n + 1) dst
 unrollRecTypes _ _ = []
@@ -246,17 +253,14 @@ unrollRecTypes _ _ = []
 -- the type is a nested product type with an application in the codomain.
 -- this application should have a variable as head
 -- the pi types are replaced by lambda's, the variable by the recursive call term
-replaceRecs :: String -> Int -> Term -> Term -> Term
-replaceRecs ref n recCall (Pi name src dst) = Lam name src (replaceRecs ref (n + 1) recCall dst)
-replaceRecs ref n recCall t = case unrollApp t of
+replaceRecs :: Int -> Term -> Term -> Term
+replaceRecs n recCall (Pi name src dst) = Lam name src (replaceRecs (n + 1) recCall dst)
+replaceRecs n recCall t = case unrollApp t of
   (Var m, args) -> mkApp (Core.lift m recCall) args
   _ -> error "expected a variable in application head in recursive call"
 
--- compute elimination rule for an inductive data types given
--- the number of constructors, number of indices, the reference to the name, the eliminator type
--- and a list associating constructor names with tags
-computeElimRule :: Int -> Int -> Term -> Term -> [(String,Int)] -> Rule
-computeElimRule ctorno indexno self @ (Def name) selfType tags whnf stack
+computeElimRule :: Int -> Int -> Term -> [Term] -> [(String,Int)] -> Rule
+computeElimRule ctorno indexno self @ (Def name) branchTypes tags whnf stack
   -- motive=1, branches=ctorno, indices=indexno, eliminee=1
   | ctorno + indexno + 2 <= length stack =
     let
@@ -267,18 +271,16 @@ computeElimRule ctorno indexno self @ (Def name) selfType tags whnf stack
       (head, args) = unrollApp eliminee
       recApp = mkApp self (motive : branches)
       argc = length args
-      Pi _ _ selfType' = selfType
     in case head of
       Def name ->
         case L.lookup name tags of
           Just tag ->
             let
-              tag' = tag
-              branch = branches !! tag'
-              computeBranchType = getNthBranch tag' 0 selfType'
-              computeBranchTypeWithArgs = psubst args (unrollPi argc computeBranchType)
-              recTypes = unrollRecTypes 0 computeBranchTypeWithArgs
-              recCalls = fmap (replaceRecs name 0 recApp) recTypes
+              branch = branches !! tag
+              branchType = branchTypes !! tag
+              branchTypeWithArgs = psubst args (unrollPi argc branchType)
+              recTypes = unrollRecTypes 0 branchTypeWithArgs
+              recCalls = fmap (replaceRecs 0 recApp) recTypes
               branchArgs = reverse args ++ recCalls ++ stack5
             in whnf branch branchArgs
           _ -> mkApp self stack
@@ -300,19 +302,15 @@ checkInductive name arity ctors = do
   zipWithM insertName ctornames ctortys
   let ctorno = length ctors
       crefs = fmap Def ctornames
-      motiveTy = motiveType ino 0 iref arity
+      motiveType = computeMotiveType ino 0 iref arity
       branchTypes = zipWith4 computeBranchType recs [0..] crefs ctortys
-      computeReturnType iname (Pi n src dst) = Pi ("i" ++ show iname) src (computeReturnType (iname + 1) dst)
-      computeReturnType iname t =
-        let indices = fmap Var (reverse [0 .. ino - 1])
-        in Pi "x" (mkApp iref indices) (mkApp (Var (ino + ctorno + 1)) (Var ino : indices))
-      returnType = computeReturnType 0 arity
+      branchTypes' = zipWith Core.lift [0..] branchTypes
+      returnType = computeReturnType ino ctorno 0 iref arity
       branchNames = fmap (\n -> "b" ++ show n) [0..]
-      branches = L.foldr (\(n,src) acc -> Pi n src acc) returnType (zip branchNames branchTypes)
-      elimTy = Pi "p" motiveTy branches
+      elimType = Pi "p" motiveType (L.foldr (\(n,src) acc -> Pi n src acc) returnType (zip branchNames branchTypes))
       elimName = name ++ "_rec"
-      elimRule = computeElimRule ctorno ino (Def elimName) elimTy (zip ctornames [0..])
-  insertName elimName elimTy
+      elimRule = computeElimRule ctorno ino (Def elimName) branchTypes' (zip ctornames [0..])
+  insertName elimName elimType
   insertRule elimName elimRule
 
 checkDefinition :: String -> Term -> StateT Signature (Either Error) ()

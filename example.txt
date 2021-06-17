@@ -76,9 +76,9 @@ let strong_aux =
 
 let strong_induction =
   \(p:nat -> Type)(h:Pi x:nat, (Pi y:nat, Less y x -> p y) -> p x)(n:nat),
-    storng_aux p h (succ n) n (less_step n)
+    strong_aux p h (succ n) n (less_base n)
 
-print strong_aux
+print strong_induction
 
 let one   = succ zero
 let two   = succ one
@@ -102,14 +102,14 @@ data fin : nat -> Type
 data acc : Pi (a : Type), (a -> a -> Type) -> a -> Type
 | acc_intro : Pi (a : Type)(r : a -> a -> Type)(x : a)(inv : Pi y : a, r y x -> acc a r y), acc a r x
 
+{-
 let acc_rec2 =
-  \(a:Type)(r:a -> a -> Type),
     acc_rec (\(a:Type)(r:a -> a -> Type)(x:a)(acx:acc a r x),
-      Pi (p : Pi x : a, acc a r x -> Type)
-        (b : Pi (x : a)(inv : Pi y : a, r y x -> acc a r y)(ih : Pi (y : a)(l : r y x), p (inv y l)), p (acc_intro x inv)), p acx)
-      (\(a:Type)(r:a -> a -> Type)(x:a)(inv:Pi y:a, r y x -> acc a r y)(ih:Pi (y:a)(l:r y x), p (inv y l)), b x inv ih)
-      a r
-
+      Pi (p : Pi x : a, acc a r x -> Type)(b : Pi (x : a)(inv : Pi y : a, r y x -> acc a r y)(ih : Pi (y : a)(l : r y x), p y (inv y l)), p x (acc_intro a r x inv)), p x acx)
+      (\(a:Type)(r:a -> a -> Type)(x:a)(inv:Pi y:a, r y x -> acc a r y)(ih:Pi (y:a)(l:r y x), 
+      Pi (p : Pi x : a, acc a r x -> Type)(b : Pi (x : a)(inv : Pi y : a, r y x -> acc a r y)(ih : Pi (y : a)(l : r y x), p y (inv y l)), p x (acc_intro a r x inv)), p y (inv y l))
+      (p : Pi x : a, acc a r x -> Type)(b : Pi (x : a)(inv : Pi y : a, r y x -> acc a r y)(ih : Pi (y : a)(l : r y x), p y (inv y l)), p x (acc_intro a r x inv)), b x inv (\(y:a)(l:r y x), ih y l p b ))
+-}
 let plus = nat_rec (\(n:nat),nat -> nat) (\(m:nat),m) (\(n:nat)(ih:nat -> nat)(m:nat), succ (ih m))
 
 let plus_associates =
@@ -125,7 +125,6 @@ let pair_rec2 =
   pair_rec (\(a b : Type)(x : pair a b), Pi p : pair a b -> Type, (Pi (x : a)(y : b), p (mk_pair a b x y)) -> p x)
     (\(a b : Type)(x : a)(y : b)(p : pair a b -> Type)(b : Pi (x : a)(y : b), p (mk_pair a b x y)), b x y)
 
-print void_rec
 print unit_rec
 print bool_rec
 print nat_rec
