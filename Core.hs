@@ -5,7 +5,6 @@ import Data.List as L
 import Control.Applicative
 import Control.Monad
 import Control.Monad.State.Lazy as S
-import Debug.Trace
 
 data Term
   = Type
@@ -324,15 +323,9 @@ checkInductive name arity ctors = do
         | convertible (flip whnf []) x y = App (App refl ty) x
       ruleK self _ whnf stack = mkApp self stack
   
-  when (name == "eq") $ do
-    traceM "test K:"
-    traceM (show (convertible (whnf sig) eqArity arity))
-    traceM (show (convertible (whnf sig) (head ctortys) (reflType (Def name))))
-  
   when (convertible (whnf sig) eqArity arity &&
     length ctors == 1 &&
     convertible (whnf sig) (head ctortys) (reflType (Def name))) $ do
-      traceM $ "K: " ++ name
       insertName kname (axiomK (Def name))
       insertRule kname (ruleK (Def kname) (Def (head ctornames)))
   
