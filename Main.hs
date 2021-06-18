@@ -36,5 +36,5 @@ main = getArgs >>= openFiles >>= checkFiles where
     ty <- S.lift $ infer sig [] term
     let nf = whnf sig term
     let tnf = whnf sig ty
-    traceM $ P.showTerm [] nf ++ "  :  " ++ P.showTerm [] tnf ++ "\n"
+    traceM $ P.showTerm [] nf ++ "\n: " ++ P.showTerm [] tnf ++ "\n"
     
