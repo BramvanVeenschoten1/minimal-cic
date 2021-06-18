@@ -6,13 +6,6 @@ import Control.Applicative
 import Control.Monad
 import Control.Monad.State.Lazy as S
 
-{-
-todo:
-- make separate computeElimType function
-- separate eliminator computation and reduction
-- branchtypes : deep to lifted -> lifted to deep
--}
-
 data Term
   = Type
   | Kind
