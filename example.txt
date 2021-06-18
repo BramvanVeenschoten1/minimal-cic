@@ -136,23 +136,6 @@ print plus_associates two two two
 print pair_rec
 print pair_rec2
 
-let J = \(a:Type)(x:a)(p : Pi z : a, eq a x z -> Type)(prefl : p x (refl a x))(y:a)(e:eq a x y),
-  eq_rec (\(a:Type)(x y:a)(e:eq a x y), Pi (p : Pi z : a, eq a x z -> Type)(prefl : p x (refl a x)), p y e)
-    (\(a:Type)(x:a)(p : Pi z : a, eq a x z -> Type)(prefl : p x (refl a x)), prefl)
-      a x y e p prefl
-
-let erase_p_is_p = \(a:Type)(x:a),
-  J a x (\(z:a)(e : eq a x z), eq (eq a x z) (eq_rec_k a x z e) e) (refl (eq a x x) (refl a x))
-
-let uip = \(a:Type)(x : a)(e : eq a x x), erase_p_is_p a x x e
-
-print uip
-
-let K = \(a:Type)(x:a)(P : eq a x x -> Type)(prefl : P (refl a x))(e : eq a x x), 
-  J (eq a x x) (refl a x) (\(z:eq a x x)(e:eq (eq a x x) (refl a x) z), P z) prefl e (uip a x e)
-  
-print J
-print K
 
 
 

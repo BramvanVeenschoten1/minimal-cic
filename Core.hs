@@ -94,18 +94,18 @@ whnf sig t = f t [] where
     Just rule -> rule f s
   f t s = mkApp t s
 
-convertible :: (Term -> Term) -> Term -> Term -> Bool
-convertible whnf t0 t1 = cmp (whnf t0) (whnf t1) where
+convertible :: Signature -> Term -> Term -> Bool
+convertible sig t0 t1 = cmp (whnf sig t0) (whnf sig t1) where
   cmp Type Type = True
   cmp Kind Kind = True
   cmp (Var n0) (Var n1) = n0 == n1
   cmp (App f0 a0) (App f1 a1) =
     cmp f0 f1 && cmp a0 a1
   cmp (Lam _ _ dst0) (Lam _ _ dst1) =
-    convertible whnf dst0 dst1
+    convertible sig dst0 dst1
   cmp (Pi _ src0 dst0) (Pi _ src1 dst1) =
-    convertible whnf src0 src1 &&
-    convertible whnf dst0 dst1
+    convertible sig src0 src1 &&
+    convertible sig dst0 dst1
   cmp (Def n0) (Def n1) = n0 == n1
   cmp _ _ = False
 
@@ -128,7 +128,7 @@ infer sig ctx t = case t of
     tf <- infer sig ctx f
     (src,dst) <- ensureFun sig ctx tf
     tx <- infer sig ctx x
-    unless (convertible (whnf sig) src tx) (Left (ExpectedType ctx src x tx))
+    unless (convertible sig src tx) (Left (ExpectedType ctx src x tx))
     pure (psubst [x] dst)
   Lam n src dst -> do
     ksrc <- infer sig ctx src
@@ -284,7 +284,7 @@ checkInductive :: String -> Term -> [(String,Term)] -> StateT Signature (Either 
 checkInductive name arity ctors = do
   sig <- get
   k <- S.lift (infer sig [] arity)
-  unless (convertible (whnf sig) k Kind) (S.lift (Left (IllFormedTypeConstructor name)))
+  unless (convertible sig k Kind) (S.lift (Left (IllFormedTypeConstructor name)))
   insertName name arity
   let ino = countDomains arity
       iref = Def name
@@ -305,30 +305,6 @@ checkInductive name arity ctors = do
       elimRule = computeElimRule ctorno ino (Def elimName) branchTypes' (zip ctornames [0..])
   insertName elimName elimType
   insertRule elimName elimRule
-  
-  sig <- get
-  let eqArity = Pi "a" Type $ Pi "x" (Var 0) $ Pi "y" (Var 1) Type
-      reflType eq = Pi "a" Type $ Pi "x" (Var 0) $ App (App (App eq (Var 1)) (Var 0)) (Var 0)
-      kname = elimName ++ "_k"
-      
-      axiomK eq =
-        Pi "a" Type $
-        Pi "x" (Var 0) $
-        Pi "y" (Var 1) $
-        Pi "e" (App (App (App eq (Var 2)) (Var 1)) (Var 0)) $
-                App (App (App eq (Var 3)) (Var 2)) (Var 1)
-
-      ruleK :: Term -> Term -> Rule
-      ruleK self refl whnf stack @ [ty,x,y,e]
-        | convertible (flip whnf []) x y = App (App refl ty) x
-      ruleK self _ whnf stack = mkApp self stack
-  
-  when (convertible (whnf sig) eqArity arity &&
-    length ctors == 1 &&
-    convertible (whnf sig) (head ctortys) (reflType (Def name))) $ do
-      insertName kname (axiomK (Def name))
-      insertRule kname (ruleK (Def kname) (Def (head ctornames)))
-  
 
 checkDefinition :: String -> Term -> StateT Signature (Either Error) ()
 checkDefinition name body = do
