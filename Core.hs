@@ -35,9 +35,9 @@ mkApp :: Term -> [Term] -> Term
 mkApp = L.foldl App
 
 unrollApp :: Term -> (Term, [Term])
-unrollApp (App fun arg) =
-  let (fun',args) = unrollApp fun in (fun',arg:args)
-unrollApp t = (t,[])
+unrollApp = f [] where
+  f acc (App fun arg) = f (arg : acc) fun
+  f acc t = (t,acc)
 
 fold :: (Hyp -> k -> k) -> k -> (k -> Term -> a -> a) -> Term -> a -> a
 fold push ctx f t = case t of
@@ -223,13 +223,13 @@ computeBranchType recs mot ctor ctorty = walkArgs mot 0 [] ctorty where
   abstractArgs mot v argc ty t = let
     args = fmap Var [0 .. argc - 1]
     indices = getIndices (Core.lift argc ty) args
-    in mkApp (Var mot) (reverse indices ++ [mkApp (Var v) args])
+    in mkApp (Var mot) (indices ++ [mkApp (Var v) args])
 
   computeResult mot ctx t = let
     ih_count = length (L.filter id recs)
     args = fmap Var [ih_count .. ih_count + ctor_arity - 1]
     indices = getIndices ctorty args
-    in mkApp (Var mot) (reverse indices ++ [mkApp ctor (reverse args)])
+    in mkApp (Var mot) (indices ++ [mkApp ctor (reverse args)])
  
 computeReturnType :: Int -> Int -> Int -> Term -> Term -> Term   
 computeReturnType ino ctorno iname iref (Pi n src dst) = Pi ("i" ++ show iname) src (computeReturnType ino ctorno (iname + 1) iref dst)
@@ -271,10 +271,10 @@ computeElimRule ctorno indexno self @ (Def name) branchTypes tags whnf stack
             let
               branch = branches !! tag
               branchType = branchTypes !! tag
-              branchTypeWithArgs = psubst args (unrollPi argc branchType)
+              branchTypeWithArgs = psubst (reverse args) (unrollPi argc branchType)
               recTypes = unrollRecTypes 0 branchTypeWithArgs
               recCalls = fmap (replaceRecs 0 recApp) recTypes
-              branchArgs = reverse args ++ recCalls ++ stack5
+              branchArgs = args ++ recCalls ++ stack5
             in whnf branch branchArgs
           _ -> mkApp self stack
       _ -> mkApp self stack
